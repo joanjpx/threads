@@ -1,0 +1,295 @@
+version: "3.9"
+
+services:
+
+  # ─────────────────────────────────────────────
+  # API GATEWAY — Nginx (reverse proxy + rate limit)
+  # ─────────────────────────────────────────────
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: gateway
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/nginx/conf.d:/etc/nginx/conf.d:ro
+    depends_on:
+      - app
+    networks:
+      - app_net
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # LARAVEL APP
+  # ─────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: docker/php/Dockerfile
+    container_name: laravel_app
+    environment:
+      APP_ENV: local
+      APP_KEY: ${APP_KEY}
+      APP_DEBUG: "true"
+
+      DB_CONNECTION: mysql
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_DATABASE: ${DB_DATABASE:-threads_db}
+      DB_USERNAME: ${DB_USERNAME:-threads_user}
+      DB_PASSWORD: ${DB_PASSWORD:-secret}
+
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-guest}
+      RABBITMQ_VHOST: "/"
+
+      KAFKA_BROKERS: kafka:9092
+
+      QUEUE_CONNECTION: rabbitmq
+    volumes:
+      - .:/var/www/html
+      - ./docker/php/local.ini:/usr/local/etc/php/conf.d/local.ini
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    networks:
+      - app_net
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # LARAVEL QUEUE WORKER (RabbitMQ consumer)
+  # ─────────────────────────────────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: docker/php/Dockerfile
+    container_name: queue_worker
+    command: php artisan queue:work rabbitmq --sleep=3 --tries=3 --timeout=90
+    environment:
+      APP_ENV: local
+      APP_KEY: ${APP_KEY}
+      DB_CONNECTION: mysql
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_DATABASE: ${DB_DATABASE:-threads_db}
+      DB_USERNAME: ${DB_USERNAME:-threads_user}
+      DB_PASSWORD: ${DB_PASSWORD:-secret}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-guest}
+      RABBITMQ_VHOST: "/"
+      KAFKA_BROKERS: kafka:9092
+      QUEUE_CONNECTION: rabbitmq
+    volumes:
+      - .:/var/www/html
+    depends_on:
+      - app
+      - rabbitmq
+      - mysql
+    networks:
+      - app_net
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # KAFKA CONSUMER WORKER (Feed fanout)
+  # ─────────────────────────────────────────────
+  kafka_worker:
+    build:
+      context: .
+      dockerfile: docker/php/Dockerfile
+    container_name: kafka_worker
+    command: php artisan kafka:consume
+    environment:
+      APP_ENV: local
+      APP_KEY: ${APP_KEY}
+      DB_CONNECTION: mysql
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_DATABASE: ${DB_DATABASE:-threads_db}
+      DB_USERNAME: ${DB_USERNAME:-threads_user}
+      DB_PASSWORD: ${DB_PASSWORD:-secret}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      KAFKA_BROKERS: kafka:9092
+      QUEUE_CONNECTION: rabbitmq
+    volumes:
+      - .:/var/www/html
+    depends_on:
+      - kafka
+      - redis
+      - mysql
+    networks:
+      - app_net
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # MYSQL 8
+  # ─────────────────────────────────────────────
+  mysql:
+    image: mysql:8.0
+    container_name: mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-rootsecret}
+      MYSQL_DATABASE: ${DB_DATABASE:-threads_db}
+      MYSQL_USER: ${DB_USERNAME:-threads_user}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-secret}
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./docker/mysql/my.cnf:/etc/mysql/conf.d/my.cnf:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD:-rootsecret}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app_net
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # REDIS 7
+  # ─────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - app_net
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # RABBITMQ 3 + Management UI
+  # ─────────────────────────────────────────────
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+    ports:
+      - "5672:5672"    # AMQP
+      - "15672:15672"  # Management UI → http://localhost:15672
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app_net
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # ZOOKEEPER (requerido por Kafka)
+  # ─────────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.1
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_log:/var/lib/zookeeper/log
+    networks:
+      - app_net
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # KAFKA
+  # ─────────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 168    # 7 días
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - app_net
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # KAFKA UI (opcional, muy útil en dev)
+  # ─────────────────────────────────────────────
+  kafka_ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka_ui
+    ports:
+      - "8080:8080"    # → http://localhost:8080
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    depends_on:
+      - kafka
+    networks:
+      - app_net
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # REDIS COMMANDER (opcional, UI para Redis)
+  # ─────────────────────────────────────────────
+  redis_ui:
+    image: rediscommander/redis-commander:latest
+    container_name: redis_ui
+    environment:
+      REDIS_HOSTS: local:redis:6379
+    ports:
+      - "8081:8081"    # → http://localhost:8081
+    depends_on:
+      - redis
+    networks:
+      - app_net
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
+  redis_data:
+  rabbitmq_data:
+  kafka_data:
+  zookeeper_data:
+  zookeeper_log:
+
+networks:
+  app_net:
+    driver: bridge
