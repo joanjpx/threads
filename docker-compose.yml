@@ -12,6 +12,7 @@ services:
       - "80:80"
       - "443:443"
     volumes:
+      - .:/var/www/html:ro
       - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./docker/nginx/conf.d:/etc/nginx/conf.d:ro
     depends_on:
@@ -278,6 +279,67 @@ services:
       - "8081:8081"    # → http://localhost:8081
     depends_on:
       - redis
+    networks:
+      - app_net
+    restart: unless-stopped
+  # ─────────────────────────────────────────────
+  # PROMETHEUS (Monitoreo)
+  # ─────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    networks:
+      - app_net
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # LOKI (Agregador de Logs)
+  # ─────────────────────────────────────────────
+  loki:
+    image: grafana/loki:latest
+    container_name: loki
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - app_net
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # PROMTAIL (Recolector de logs → Loki)
+  # ─────────────────────────────────────────────
+  promtail:
+    image: grafana/promtail:latest
+    container_name: promtail
+    volumes:
+      - ./docker/promtail/config.yml:/etc/promtail/config.yml:ro
+      - ./storage/logs:/var/log/laravel:ro
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
+    networks:
+      - app_net
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # GRAFANA (Métricas + Logs visuales)
+  # ─────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    depends_on:
+      - prometheus
+      - loki
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
     networks:
       - app_net
     restart: unless-stopped

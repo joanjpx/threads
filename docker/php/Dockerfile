@@ -37,6 +37,22 @@ RUN apk add --no-cache librdkafka-dev \
     && pecl install rdkafka \
     && docker-php-ext-enable rdkafka
 
+# Instalar php-spx profiling extension
+RUN apk add --no-cache zlib-dev \
+    && git clone https://github.com/NoiseByNorthwest/php-spx.git \
+    && cd php-spx \
+    && phpize \
+    && ./configure \
+    && make \
+    && make install \
+    && docker-php-ext-enable spx \
+    && cd .. && rm -rf php-spx
+
+# Configurar SPX localmente insertando un conf para php
+RUN echo "spx.http_enabled=1" >> /usr/local/etc/php/conf.d/docker-php-ext-spx.ini \
+    && echo "spx.http_key=\"dev\"" >> /usr/local/etc/php/conf.d/docker-php-ext-spx.ini \
+    && echo "spx.http_ip_whitelist=\"*\"" >> /usr/local/etc/php/conf.d/docker-php-ext-spx.ini
+
 # Composer
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
@@ -46,7 +62,7 @@ WORKDIR /var/www/html
 COPY . .
 
 # Instalar dependencias PHP
-RUN composer install --no-interaction --optimize-autoloader --no-dev
+RUN composer install --no-interaction --optimize-autoloader --no-dev --no-scripts
 
 # Permisos
 RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache

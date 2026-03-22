@@ -15,11 +15,28 @@ class DatabaseSeeder extends Seeder
      */
     public function run(): void
     {
-        // User::factory(10)->create();
-
-        User::factory()->create([
-            'name' => 'Test User',
-            'email' => 'test@example.com',
+        $user1 = User::factory()->create([
+            'name' => 'El Influencer',
+            'email' => 'influencer@example.com',
+            'password' => 'password',
         ]);
+
+        $user2 = User::factory()->create([
+            'name' => 'El Fan',
+            'email' => 'fan@example.com',
+            'password' => 'password',
+        ]);
+
+        // User 2 follows User 1
+        $user2->following()->attach($user1->id);
+
+        // Generar algunos threads para el influencer y dejarlos ya listos en Redis
+        $threads = \App\Models\Thread::factory(5)->create(['user_id' => $user1->id]);
+        
+        // Push manually to Redis to simulate the Kafka queue for existing records
+        $redisKey = "feed:{$user2->id}";
+        foreach ($threads as $thread) {
+            \Illuminate\Support\Facades\Redis::lpush($redisKey, $thread->id);
+        }
     }
 }
